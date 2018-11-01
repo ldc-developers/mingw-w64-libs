@@ -1,5 +1,5 @@
 //
-// Convert MingGW-w64 definition files to COFF import librries
+// Convert MingGW-w64 definition files to COFF import libraries
 //
 // Distributed under the Boost Software License, Version 1.0.
 //   (See accompanying file LICENSE_1_0.txt or copy at
@@ -85,9 +85,47 @@ void generateDef(string inFile, string outFile)
 
 void sanitizeDef(string defFile)
 {
+    // The MinGW runtime overrides some functions and hides the original
+    // functions by appending a ' DATA' suffix in the .def files.
+    static __gshared const overriddenMinGWFunctions =
+    [
+        // ucrtbase.def:
+        "_assert", "_cabs", "_fpreset", "_tzset",
+        "ceil", "ceilf", "coshf", "fabs",
+        "floor", "floorf", "modf", "modff",
+        "sinhf", "sqrt", "sqrtf", "wcsnlen",
+        // additional ones in msvcr100.def:
+        "__report_gsfailure",
+        "_byteswap_uint64", "_byteswap_ulong", "_byteswap_ushort",
+        "_difftime32", "_difftime64",
+        "_fseeki64", "_ftelli64",
+        "_get_errno",
+        "_rotl64", "_rotr64",
+        "_set_errno",
+        "_wassert",
+        "acosf", "asinf", "atan2", "atan2f", "atanf",
+        "btowc",
+        "cos", "cosf", "exp", "expf", "fmod", "fmodf", "ldexp",
+        "longjmp",
+        "llabs", "lldiv",
+        "log", "log10f", "logf",
+        "mbrlen", "mbrtowc", "mbsrtowcs",
+        "pow", "powf",
+        "sin", "sinf",
+        "strnlen",
+        "tanf", "tanhf",
+        "wcrtomb", "wcsrtombs", "wctob",
+    ];
+
     patchLines(defFile, defFile, (line)
     {
-        if (line.length == 0 || line[0] == ';')
+        if (line.length == 0)
+            return line;
+
+        if (line == "; strnlen replaced by emu")
+            return "strnlen";
+
+        if (line[0] == ';')
             return line;
 
         if (line == "LIBRARY vcruntime140_app")
@@ -107,14 +145,12 @@ void sanitizeDef(string defFile)
             }
         }
 
-        // The MinGW runtime apparently replaces ceil(f)/floor(f) and hides the original functions via DATA.
-        if (line == "ceil DATA" || line == "ceilf DATA" ||
-            line == "floor DATA" || line == "floorf DATA")
-            return line[0 .. $-5];
-
-        // MinGW apparently also replaces ucrtbase.dll's '_tzset'.
-        if (line == "_tzset DATA")
-            return "_tzset";
+        // Un-hide functions overridden by the MinGW runtime.
+        foreach (name; overriddenMinGWFunctions)
+        {
+            if (line.length == name.length + 5 && line.startsWith(name) && line.endsWith(" DATA"))
+                return name;
+        }
 
         // Don't export function 'atexit'; we have our own in msvc_atexit.c.
         if (line == "atexit")
@@ -167,8 +203,7 @@ void def2implib(string defFile)
     }
 
     const libFile = setExtension(defFile, ".lib");
-    const arch = x64 ? "X64" : "X86";
-    runShell(`lib /MACHINE:` ~ arch ~ ` "/DEF:` ~ defFile ~ `" "/OUT:` ~ libFile ~ `"`);
+    runShell(`lib "/DEF:` ~ defFile ~ `" "/OUT:` ~ libFile ~ `"`);
     std.file.remove(setExtension(defFile, ".exp"));
 }
 
@@ -309,13 +344,12 @@ void c2lib(string outDir, string cFile)
     const obj = buildPath(outDir, baseName(cFile).setExtension(".obj"));
     const lib = setExtension(obj, ".lib");
     cl(obj, quote(cFile));
-    runShell(`lib /MACHINE:` ~ (x64 ? "X64" : "X86") ~ ` "/OUT:` ~ lib ~ `" "` ~ obj ~ `"`);
+    runShell(`lib "/OUT:` ~ lib ~ `" ` ~ quote(obj));
     std.file.remove(obj);
 }
 
 void buildMsvcrt(string outDir)
 {
-    const arch = x64 ? "X64" : "X86";
     foreach (lib; std.file.dirEntries(outDir, "*.lib", SpanMode.shallow))
     {
         const lowerBase = toLower(baseName(lib.name));
@@ -325,7 +359,9 @@ void buildMsvcrt(string outDir)
         // parse version from filename (e.g., 140 for VC++ 2015)
         const versionStart = lowerBase[0] == 'm' ? 5 : 9;
         const versionLength = lowerBase[versionStart .. $].countUntil!(c => !isDigit(c));
-        const msvcrtVersion = versionLength == 0 ? "0" : lowerBase[versionStart .. versionStart+versionLength];
+        const msvcrtVersion = versionLength == 0
+            ? "70" // msvcrt.lib
+            : lowerBase[versionStart .. versionStart+versionLength];
 
         string[] objs;
         void addObj(string objFilename, string args)
@@ -348,7 +384,7 @@ void buildMsvcrt(string outDir)
         }
 
         // merge them into the library
-        runShell(`lib /MACHINE:` ~ arch ~ ` "` ~ lib.name ~ `" ` ~ objs.map!quote.join(" "));
+        runShell("lib " ~ quote(lib.name) ~ " " ~ objs.map!quote.join(" "));
 
         foreach (obj; objs)
             std.file.remove(obj);
@@ -388,6 +424,14 @@ void buildUuid(string outDir)
     std.file.remove(src);
 }
 
+// vfw32.lib is a merge of 3 other libs
+void buildVfw32(string outDir)
+{
+    auto srcLibs = [ "msvfw32", "avicap32", "avifil32" ].map!(name => buildPath(outDir, name ~ ".lib"));
+    const outLib = buildPath(outDir, "vfw32.lib");
+    runShell(`lib "/OUT:` ~ outLib ~ `" ` ~ srcLibs.map!quote.join(" "));
+}
+
 void main(string[] args)
 {
     x64 = (args.length > 1 && args[1] == "x64");
@@ -405,6 +449,19 @@ void main(string[] args)
     buildOldnames(outDir);
     buildLegacyStdioDefinitions(outDir);
     buildUuid(outDir);
+    buildVfw32(outDir);
+
+    // rename msvcr<N>.lib to msvcrt<N>.lib as expected by DMD
+    foreach (lib; std.file.dirEntries(outDir, "msvcr*.lib", SpanMode.shallow))
+    {
+        const base = baseName(lib.name);
+        if (!isDigit(base[5])) // msvcrt.lib
+            continue;
+        const newName = buildPath(outDir, "msvcrt" ~ base[5 .. $]);
+        version (verbose)
+            writefln("Renaming '%s' to '%s'", lib.name, newName);
+        std.file.rename(lib.name, newName);
+    }
 
     //version (verbose) {} else
         foreach (f; std.file.dirEntries(outDir, "*.def*", SpanMode.shallow))

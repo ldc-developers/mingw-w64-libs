@@ -336,11 +336,11 @@ bool defWithStdcallMangling2implib(string defFile)
     return true;
 }
 
-void c2lib(string outDir, string cFile)
+void c2lib(string outDir, string cFile, string clFlags = null)
 {
     const obj = buildPath(outDir, baseName(cFile).setExtension(".obj"));
     const lib = setExtension(obj, ".lib");
-    cl(obj, quote(cFile));
+    cl(obj, clFlags ? clFlags ~ " " ~ quote(cFile) : quote(cFile));
     runShell(`lib "/OUT:` ~ lib ~ `" ` ~ quote(obj));
     std.file.remove(obj);
 }
@@ -431,7 +431,7 @@ void buildOldnames(string outDir)
 
 void buildLegacyStdioDefinitions(string outDir)
 {
-    c2lib(outDir, "legacy_stdio_definitions.c");
+    c2lib(outDir, "legacy_stdio_definitions.c", "/O2");
 }
 
 // create empty uuid.lib (expected by dmd, but UUIDs already in druntime)

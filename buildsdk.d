@@ -117,6 +117,7 @@ void sanitizeDef(string defFile)
         "strnlen",
         "tanf", "tanhf",
         "wcrtomb", "wcsrtombs", "wctob",
+        "__lc_collate_cp", "_osplatform",
     ];
 
     patchLines(defFile, defFile, (line)
@@ -146,7 +147,7 @@ void sanitizeDef(string defFile)
         }
 
         // Un-hide functions overridden by the MinGW runtime.
-        if (line.endsWith(" DATA"))
+        if (line.endsWith(" DATA") || line.endsWith("\tDATA"))
         {
             foreach (name; overriddenMinGWFunctions)
             {
@@ -254,7 +255,7 @@ bool defWithStdcallMangling2implib(string defFile)
             line.startsWith("LIBRARY ") || line.startsWith("EXPORTS"))
             return line;
 
-        if (line.length > 5 && (line[$-5] == ' ' || line[$-5] == '\t') && line.endsWith("DATA"))
+        if (line.endsWith(" DATA") || line.endsWith("\tDATA"))
         {
             fields ~= line[0 .. $-5];
             return line;
@@ -346,7 +347,7 @@ void c2lib(string outDir, string cFile, string clFlags = null)
 {
     const obj = buildPath(outDir, baseName(cFile).setExtension(".obj"));
     const lib = setExtension(obj, ".lib");
-    cl(obj, clFlags ? clFlags ~ " " ~ quote(cFile) : quote(cFile));
+    cl(obj, clFlags ~ (clFlags ? " " : null) ~ quote(cFile));
     runShell(`lib "/OUT:` ~ lib ~ `" ` ~ quote(obj));
     std.file.remove(obj);
 }
